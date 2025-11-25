@@ -1,17 +1,17 @@
-# SPSCQueue.h
+# SPSCQueuePow2.h
 
-[![C/C++ CI](https://github.com/rigtorp/SPSCQueue/workflows/C/C++%20CI/badge.svg)](https://github.com/rigtorp/SPSCQueue/actions)
-[![License](https://img.shields.io/badge/license-MIT-blue.svg)](https://raw.githubusercontent.com/rigtorp/SPSCQueue/master/LICENSE)
+[![C/C++ CI](https://github.com/dhruvan2006/SPSCQueuePow2/workflows/C/C++%20CI/badge.svg)](https://github.com/dhruvan2006/SPSCQueuePow2/actions)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](https://raw.githubusercontent.com/dhruvan2006/SPSCQueuePow2/master/LICENSE)
 
 A single producer single consumer wait-free and lock-free fixed size queue
-written in C++11. This implementation is faster than both
-[*boost::lockfree::spsc*](https://www.boost.org/doc/libs/1_76_0/doc/html/boost/lockfree/spsc_queue.html)
-and [*folly::ProducerConsumerQueue*](https://github.com/facebook/folly/blob/master/folly/docs/ProducerConsumerQueue.md).
+written in C++11. This queue **requires the capacity to be a power of 2** for enhanced performance.
+
+This implementation is faster than [*rigtorp::SPSCQueue*](https://github.com/rigtorp/SPSCQueue).
 
 ## Example
 
 ```cpp
-SPSCQueue<int> q(1);
+SPSCQueuePow2<int> q(2);
 auto t = std::thread([&] {
   while (!q.front());
   std::cout << *q.front() << std::endl;
@@ -25,10 +25,10 @@ See `src/SPSCQueueExample.cpp` for the full example.
 
 ## Usage
 
-- `SPSCQueue<T>(size_t capacity);`
+- `SPSCQueuePow2<T>(size_t capacity);`
 
-  Create a `SPSCqueue` holding items of type `T` with capacity
-  `capacity`. Capacity needs to be at least 1.
+  Create a `SPSCqueuePow2` holding items of type `T` with capacity
+  `capacity`. Capacity needs to be a power of 2.
 
 - `void emplace(Args &&... args);`
 
@@ -135,10 +135,14 @@ pages on Linux.
 
 ## Implementation
 
-![Memory layout](https://github.com/rigtorp/SPSCQueue/blob/master/spsc.svg)
+![Memory layout](https://github.com/dhruvan2006/SPSCQueuePow2/blob/master/spsc.svg)
 
 The underlying implementation is based on a [ring
 buffer](https://en.wikipedia.org/wiki/Circular_buffer).
+
+By enforcing the queue's capacity to be a power of 2 (e.g., 2, 4, 8, 16, ...), the expensive branch operation `if (index==capacity_)` required to wrap around the ring buffer is replaced with a much faster bitwise AND operation `(index&(capacity−1))`.
+
+This fork also removes the extra "padding" element used in the original implementation to distinguish between full and empty states, simplifying the buffer layout to be exactly capacity elements.
 
 Care has been taken to make sure to avoid any issues with [false
 sharing](https://en.wikipedia.org/wiki/False_sharing). The head and tail indices
@@ -168,15 +172,124 @@ the cached tail index can complete without stealing the writer's tail index
 cache line's exclusive state. Cache coherency traffic is therefore reduced. An
 analogous argument can be made for the queue write operation.
 
-This implementation allows for arbitrary non-power of two capacities, instead
-allocating a extra queue slot to indicate full queue. If you don't want to waste
-storage for a extra queue slot you should use a different implementation.
-
 References:
 
 - *Intel*. [Avoiding and Identifying False Sharing Among Threads](https://software.intel.com/en-us/articles/avoiding-and-identifying-false-sharing-among-threads).
 - *Wikipedia*. [Ring buffer](https://en.wikipedia.org/wiki/Circular_buffer).
 - *Wikipedia*. [False sharing](https://en.wikipedia.org/wiki/False_sharing).
+
+<details>
+<summary>Click to view the full diff (SPSCQueuePow2.h vs. SPSCQueue.h)</summary>
+
+```diff
+44c44
+< template <typename T, typename Allocator = std::allocator<T>> class SPSCQueuePow2 {
+---
+> template <typename T, typename Allocator = std::allocator<T>> class SPSCQueue {
+58c58
+<   explicit SPSCQueuePow2(const size_t capacity,
+---
+>   explicit SPSCQueue(const size_t capacity,
+61,65c61,65
+<     // Capacity must be power of 2
+<     assert(capacity_ > 0 && ((capacity_ & (capacity_ - 1)) == 0) && "Capacity must be a power of 2");
+< 
+<     mask_ = capacity_ - 1;
+< 
+---
+>     // The queue needs at least one element
+>     if (capacity_ < 1) {
+>       capacity_ = 1;
+>     }
+>     capacity_++; // Needs one slack element
+68c68
+<       throw std::length_error("Capacity too large");
+---
+>       capacity_ = SIZE_MAX - 2 * kPadding;
+75c75
+<       // capacity_ = res.count - 2 * kPadding; TODO: Is this safe
+---
+>       capacity_ = res.count - 2 * kPadding;
+85,86c85,86
+<     static_assert(alignof(SPSCQueuePow2<T>) == kCacheLineSize, "");
+<     static_assert(sizeof(SPSCQueuePow2<T>) >= 3 * kCacheLineSize, "");
+---
+>     static_assert(alignof(SPSCQueue<T>) == kCacheLineSize, "");
+>     static_assert(sizeof(SPSCQueue<T>) >= 3 * kCacheLineSize, "");
+92c92
+<   ~SPSCQueuePow2() {
+---
+>   ~SPSCQueue() {
+101,102c101,102
+<   SPSCQueuePow2(const SPSCQueuePow2 &) = delete;
+<   SPSCQueuePow2 &operator=(const SPSCQueuePow2 &) = delete;
+---
+>   SPSCQueue(const SPSCQueue &) = delete;
+>   SPSCQueue &operator=(const SPSCQueue &) = delete;
+110c110,114
+<     while (writeIdx - readIdxCache_ == capacity_) {
+---
+>     auto nextWriteIdx = writeIdx + 1;
+>     if (nextWriteIdx == capacity_) {
+>       nextWriteIdx = 0;
+>     }
+>     while (nextWriteIdx == readIdxCache_) {
+113,114c117,118
+<     new (&slots_[(writeIdx & mask_) + kPadding]) T(std::forward<Args>(args)...);
+<     writeIdx_.store(writeIdx + 1, std::memory_order_release);
+---
+>     new (&slots_[writeIdx + kPadding]) T(std::forward<Args>(args)...);
+>     writeIdx_.store(nextWriteIdx, std::memory_order_release);
+123c127,131
+<     if (writeIdx - readIdxCache_ == capacity_) {
+---
+>     auto nextWriteIdx = writeIdx + 1;
+>     if (nextWriteIdx == capacity_) {
+>       nextWriteIdx = 0;
+>     }
+>     if (nextWriteIdx == readIdxCache_) {
+125c133
+<       if (writeIdx - readIdxCache_ == capacity_) {
+---
+>       if (nextWriteIdx == readIdxCache_) {
+129,130c137,138
+<     new (&slots_[(writeIdx & mask_) + kPadding]) T(std::forward<Args>(args)...);
+<     writeIdx_.store(writeIdx + 1, std::memory_order_release);
+---
+>     new (&slots_[writeIdx + kPadding]) T(std::forward<Args>(args)...);
+>     writeIdx_.store(nextWriteIdx, std::memory_order_release);
+168c176
+<     return &slots_[(readIdx & mask_) + kPadding];
+---
+>     return &slots_[readIdx + kPadding];
+177,178c185,190
+<     slots_[(readIdx & mask_) + kPadding].~T();
+<     readIdx_.store(readIdx + 1, std::memory_order_release);
+---
+>     slots_[readIdx + kPadding].~T();
+>     auto nextReadIdx = readIdx + 1;
+>     if (nextReadIdx == capacity_) {
+>       nextReadIdx = 0;
+>     }
+>     readIdx_.store(nextReadIdx, std::memory_order_release);
+182,183c194,199
+<     return writeIdx_.load(std::memory_order_acquire) -
+<            readIdx_.load(std::memory_order_acquire);
+---
+>     std::ptrdiff_t diff = writeIdx_.load(std::memory_order_acquire) -
+>                           readIdx_.load(std::memory_order_acquire);
+>     if (diff < 0) {
+>       diff += capacity_;
+>     }
+>     return static_cast<size_t>(diff);
+191c207
+<   RIGTORP_NODISCARD size_t capacity() const noexcept { return capacity_; }
+---
+>   RIGTORP_NODISCARD size_t capacity() const noexcept { return capacity_ - 1; }
+206d221
+<   size_t mask_;
+```
+</details>
 
 ## Testing
 
@@ -197,14 +310,14 @@ items.
 Latency benchmark measures round trip time between 2 threads communicating using
 2 queues of `int` items.
 
-Benchmark results for a AMD Ryzen 9 3900X 12-Core Processor, the 2 threads are
+Benchmark results for a AMD Ryzen 9 6900HS 8-Core Processor, the 2 threads are
 running on different cores on the same chiplet:
 
-| Queue                        | Throughput (ops/ms) | Latency RTT (ns) |
-| ---------------------------- | ------------------: | ---------------: |
-| SPSCQueue                    |              362723 |              133 |
-| boost::lockfree::spsc        |              209877 |              222 |
-| folly::ProducerConsumerQueue |              148818 |              147 |
+| Queue                 | Throughput (ops/ms) | Latency RTT (ns) | Multiplier |
+|-----------------------|--------------------:|-----------------:|-----------:|
+| SPSCQueuePow2         |              235962 |               64 |  **1.13x** |
+| rigtorp::SPSCQueue    |              208813 |               64 |       1.0x |
+| boost::lockfree::spsc |              118993 |               78 |      0.57x |
 
 ## Cited by
 
@@ -216,5 +329,7 @@ SPSCQueue have been cited by the following papers:
 
 ## About
 
-This project was created by [Erik Rigtorp](http://rigtorp.se)
+This project is a fork of the original SPSCQueue created by [Erik Rigtorp](http://rigtorp.se)
 <[erik@rigtorp.se](mailto:erik@rigtorp.se)>.
+
+This SPSCQueuePow2 fork was created by [Dhruvan Gnanadhandayuthapani](https://dhruvan.dev) <[dhruvan2006@gmail.com](mailto:dhruvan2006@gmail.com)>.

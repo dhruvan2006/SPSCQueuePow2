@@ -25,7 +25,7 @@ SOFTWARE.
 #include <cassert>
 #include <chrono>
 #include <iostream>
-#include <rigtorp/SPSCQueue.h>
+#include <rigtorp/SPSCQueuePow2.h> // Changed to SPSCQueuePow2
 #include <set>
 #include <thread>
 
@@ -71,25 +71,26 @@ int main(int argc, char *argv[]) {
 
   // Functionality test
   {
-    SPSCQueue<TestType> q(10);
+    SPSCQueuePow2<TestType> q(8);
     assert(q.front() == nullptr);
     assert(q.size() == 0);
     assert(q.empty() == true);
-    assert(q.capacity() == 10);
-    for (int i = 0; i < 10; i++) {
+    assert(q.capacity() == 8);
+    for (int i = 0; i < 8; i++) {
       q.emplace();
     }
     assert(q.front() != nullptr);
-    assert(q.size() == 10);
+    assert(q.size() == 8);
     assert(q.empty() == false);
-    assert(TestType::constructed.size() == 10);
+    assert(TestType::constructed.size() == 8);
+    // Try to enqueue one more
     assert(q.try_emplace() == false);
     q.pop();
-    assert(q.size() == 9);
-    assert(TestType::constructed.size() == 9);
+    assert(q.size() == 7);
+    assert(TestType::constructed.size() == 7);
     q.pop();
     assert(q.try_emplace() == true);
-    assert(TestType::constructed.size() == 9);
+    assert(TestType::constructed.size() == 7);
   }
   assert(TestType::constructed.size() == 0);
 
@@ -100,7 +101,7 @@ int main(int argc, char *argv[]) {
       Test(const Test &) {}
       Test(Test &&) = delete;
     };
-    SPSCQueue<Test> q(16);
+    SPSCQueuePow2<Test> q(16);
     // lvalue
     Test v;
     q.emplace(v);
@@ -125,7 +126,7 @@ int main(int argc, char *argv[]) {
       Test(const Test &) noexcept {}
       Test(Test &&) = delete;
     };
-    SPSCQueue<Test> q(16);
+    SPSCQueuePow2<Test> q(16);
     // lvalue
     Test v;
     q.emplace(v);
@@ -145,7 +146,7 @@ int main(int argc, char *argv[]) {
 
   // Movable only type
   {
-    SPSCQueue<std::unique_ptr<int>> q(16);
+    SPSCQueuePow2<std::unique_ptr<int>> q(16);
     // lvalue
     // auto v = std::unique_ptr<int>(new int(1));
     // q.emplace(v);
@@ -164,27 +165,11 @@ int main(int argc, char *argv[]) {
     static_assert(noexcept(q.try_push(std::move(v))) == true, "");
   }
 
-  // capacity < 1
-  {
-    SPSCQueue<int> q(0);
-    assert(q.capacity() == 1);
-  }
-
-  // Check that padding doesn't overflow capacity
-  {
-    bool throws = false;
-    try {
-      SPSCQueue<int> q(SIZE_MAX - 1);
-    } catch (...) {
-      throws = true;
-    }
-    assert(throws);
-  }
 
   // Fuzz and performance test
   {
     const size_t iter = 100000;
-    SPSCQueue<size_t> q(iter / 1000 + 1);
+    SPSCQueuePow2<size_t> q(128);
     std::atomic<bool> flag(false);
     std::thread producer([&] {
       while (!flag)
